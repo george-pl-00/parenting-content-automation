@@ -1,0 +1,106 @@
+name: Deploy to Heroku
+
+on:
+  push:
+    branches: [ main, staging ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+  HEROKU_APP_NAME_PROD: ${{ secrets.HEROKU_APP_NAME_PROD }}
+  HEROKU_APP_NAME_STAGING: ${{ secrets.HEROKU_APP_NAME_STAGING }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-asyncio
+        
+    - name: Run tests
+      run: |
+        pytest tests/ -v --cov=app --cov-report=term-missing
+        
+    - name: Test content generation
+      run: |
+        python -m pytest tests/test_content_engine.py -v
+        
+  deploy-staging:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/staging'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to Staging
+      uses: akhileshns/heroku-deploy@v3.12.14
+      with:
+        heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
+        heroku_app_name: ${{ secrets.HEROKU_APP_NAME_STAGING }}
+        heroku_email: ${{ secrets.HEROKU_EMAIL }}
+        
+    - name: Run staging tests
+      run: |
+        sleep 30  # Wait for deployment
+        curl -f https://${{ secrets.HEROKU_APP_NAME_STAGING }}.herokuapp.com/health
+        
+  deploy-production:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to Production
+      uses: akhileshns/heroku-deploy@v3.12.14
+      with:
+        heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
+        heroku_app_name: ${{ secrets.HEROKU_APP_NAME_PROD }}
+        heroku_email: ${{ secrets.HEROKU_EMAIL }}
+        
+    - name: Run post-deployment tasks
+      run: |
+        # Wait for deployment to complete
+        sleep 45
+        
+        # Health check
+        curl -f https://${{ secrets.HEROKU_APP_NAME_PROD }}.herokuapp.com/health
+        
+        # Trigger content generation test
+        curl -X POST https://${{ secrets.HEROKU_APP_NAME_PROD }}.herokuapp.com/test/generate-content
+        
+  notify:
+    needs: [deploy-production]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify deployment status
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        text: |
+          Parenting Content Automation deployment ${{ job.status }}!
+          Environment: Production
+          Commit: ${{ github.sha }}
